@@ -9,8 +9,11 @@ import {
 } from "lucide-react";
 import Thumb from "../components/Thumb";
 import Modal from "../components/Modal";
+import ProfileModal from "../components/ProfileModal";
+import ArticleModal from "../components/ArticleModal";
 import {
-  DESIGNERS, SHOTS, CATS, COLOR_KEYS, TOOLS, JOBS, HIRE_IDS, fmt,
+  DESIGNERS, SHOTS, CATS, COLOR_KEYS, TOOLS, JOBS, HIRE_IDS,
+  STUDIOS, ARTICLES, fmt,
 } from "../lib/data";
 
 const PAGE = 12;
@@ -46,7 +49,76 @@ function Badge({ badge }) {
   return <span className={`badge badge-${badge.toLowerCase()}`}>{badge}</span>;
 }
 
-function Card({ shot, fresh, isLiked, isSaved, likeCount, onOpen, onLike, onSave }) {
+/* Animated number for the hero stats. */
+function CountUp({ value, decimals = 0, suffix = "" }) {
+  const ref = useRef(null);
+  const [v, setV] = useState(0);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches || !("IntersectionObserver" in window)) {
+      setV(value);
+      return;
+    }
+    const io = new IntersectionObserver(([e]) => {
+      if (!e.isIntersecting) return;
+      io.disconnect();
+      const t0 = performance.now();
+      const dur = 1300;
+      const tick = (t) => {
+        const p = Math.min(1, (t - t0) / dur);
+        setV(value * (1 - Math.pow(1 - p, 3)));
+        if (p < 1) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }, { threshold: 0.4 });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [value]);
+  return <b ref={ref}>{v.toFixed(decimals)}{suffix}</b>;
+}
+
+/* Dribbble-style rotating headline word. */
+const ROT_WORDS = ["sharpest", "boldest", "most curious", "finest"];
+function RotatingWord() {
+  const [i, setI] = useState(0);
+  const [out, setOut] = useState(false);
+  useEffect(() => {
+    if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const t = setInterval(() => {
+      setOut(true);
+      setTimeout(() => {
+        setI((x) => (x + 1) % ROT_WORDS.length);
+        setOut(false);
+      }, 240);
+    }, 2600);
+    return () => clearInterval(t);
+  }, []);
+  return <em className={`rot${out ? " out" : ""}`}>{ROT_WORDS[i]}</em>;
+}
+
+/* Reveal-on-scroll for sections. */
+function useReveal() {
+  useEffect(() => {
+    const els = document.querySelectorAll(".reveal");
+    if (!("IntersectionObserver" in window)) {
+      els.forEach((el) => el.classList.add("in"));
+      return;
+    }
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) {
+          e.target.classList.add("in");
+          io.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.1, rootMargin: "0px 0px -40px 0px" });
+    els.forEach((el) => io.observe(el));
+    return () => io.disconnect();
+  }, []);
+}
+
+function Card({ shot, delay, isLiked, isSaved, likeCount, onOpen, onOpenProfile, onLike, onSave }) {
   const des = DESIGNERS[shot.d];
   const act = (fn) => (e) => { e.stopPropagation(); fn(shot.id); };
   const key = (fn) => (e) => {
@@ -57,7 +129,7 @@ function Card({ shot, fresh, isLiked, isSaved, likeCount, onOpen, onLike, onSave
     }
   };
   return (
-    <article className={`card${fresh ? " fade-in" : ""}`}>
+    <article className="card" style={{ animationDelay: `${delay}ms` }}>
       <button className="card-thumb" onClick={() => onOpen(shot.id)} aria-label={`Open ${shot.t} by ${des.n}`}>
         <Thumb shot={shot} />
         <span className="overlay">
@@ -83,8 +155,10 @@ function Card({ shot, fresh, isLiked, isSaved, likeCount, onOpen, onLike, onSave
         </span>
       </button>
       <div className="card-meta">
-        <span className="ava" style={{ background: des.hue }} aria-hidden="true">{des.init}</span>
-        <span className="name">{des.n}</span>
+        <button className="meta-link" onClick={() => onOpenProfile(shot.d)} aria-label={`Open ${des.n}'s profile`}>
+          <span className="ava" style={{ background: des.hue }} aria-hidden="true">{des.init}</span>
+          <span className="name">{des.n}</span>
+        </button>
         <Badge badge={des.badge} />
         <span className="card-stats">
           <span><Heart className="i" aria-hidden="true" />{fmt(likeCount)}</span>
@@ -106,23 +180,33 @@ export default function Home() {
   const [shown, setShown] = useState(PAGE);
   const [freshFrom, setFreshFrom] = useState(null);
 
-  /* ---------- social state (hydrated from localStorage) ---------- */
+  /* ---------- social state (local) + server like totals ---------- */
   const [liked, setLiked] = useState(() => new Set());
   const [saved, setSaved] = useState(() => new Set());
   const [follows, setFollows] = useState(() => new Set());
+  const [serverLikes, setServerLikes] = useState(null);
+
   useEffect(() => {
     setLiked(new Set(ls.get("liked", [])));
     setSaved(new Set(ls.get("saved", [])));
     setFollows(new Set(ls.get("follows", [])));
+    fetch("/api/shots")
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((d) => setServerLikes(d.likes))
+      .catch(() => {}); /* static fallback: data.js counts */
   }, []);
 
   /* ---------- ui state ---------- */
   const [modalId, setModalId] = useState(null);
+  const [profileId, setProfileId] = useState(null);
+  const [articleSlug, setArticleSlug] = useState(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [panelOpen, setPanelOpen] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [theme, setTheme] = useState(null);
   const hireRef = useRef(null);
+
+  useReveal();
 
   /* ---------- theme ---------- */
   useEffect(() => {
@@ -145,15 +229,27 @@ export default function Home() {
     setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 2900);
   }, []);
 
-  /* ---------- social actions ---------- */
-  const likesOf = useCallback((s) => s.likes + (liked.has(s.id) ? 1 : 0), [liked]);
+  /* ---------- likes: optimistic local + server POST ---------- */
+  const likesOf = useCallback(
+    (s) => serverLikes?.[s.id] ?? (s.likes + (liked.has(s.id) ? 1 : 0)),
+    [serverLikes, liked]
+  );
   function toggleLike(id) {
     const s = SHOTS.find((x) => x.id === id);
+    const on = !liked.has(id);
     const n = new Set(liked);
-    const on = !n.has(id);
     on ? n.add(id) : n.delete(id);
     setLiked(n);
     ls.set("liked", [...n]);
+    setServerLikes((prev) => {
+      const base = prev?.[id] ?? (s.likes + (on ? 0 : 1));
+      return { ...(prev || {}), [id]: Math.max(0, base + (on ? 1 : -1)) };
+    });
+    fetch(`/api/shots/${id}/like`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ delta: on ? 1 : -1 }),
+    }).catch(() => {});
     toast(on ? `Liked “${s.t}”` : "Like removed");
   }
   function toggleSave(id) {
@@ -211,6 +307,7 @@ export default function Home() {
 
   const visible = filteredList.slice(0, shown);
   const filterCount = (color ? 1 : 0) + (time !== "any" ? 1 : 0) + tools.size;
+  const filterKey = [cat, q, sort, color, time, [...tools].sort().join(",")].join("|");
 
   function clearFilters(all) {
     setColor(null);
@@ -228,30 +325,65 @@ export default function Home() {
     if (scroll) document.getElementById("explore")?.scrollIntoView({ behavior: "smooth" });
   }
 
-  /* ---------- modal / menu side effects ---------- */
+  async function subscribe(e) {
+    e.preventDefault();
+    const input = e.target.querySelector("input");
+    const email = input.value;
+    try {
+      const r = await fetch("/api/newsletter", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        toast(d.error || "Something went wrong — try again");
+        return;
+      }
+      const { count } = await r.json();
+      toast(`You're in — subscriber #${count.toLocaleString()}. First digest lands Friday`);
+      e.target.reset();
+    } catch {
+      toast("You're on the list — first digest lands Friday");
+      e.target.reset();
+    }
+  }
+
+  /* ---------- overlay side effects ---------- */
+  const anyOverlay = modalId !== null || profileId !== null || articleSlug !== null || menuOpen;
   useEffect(() => {
-    document.body.style.overflow = modalId !== null || menuOpen ? "hidden" : "";
+    document.body.style.overflow = anyOverlay ? "hidden" : "";
     return () => { document.body.style.overflow = ""; };
-  }, [modalId, menuOpen]);
+  }, [anyOverlay]);
 
   useEffect(() => {
     function onKey(e) {
       if (e.key !== "Escape") return;
       if (modalId !== null) setModalId(null);
+      else if (profileId !== null) setProfileId(null);
+      else if (articleSlug !== null) setArticleSlug(null);
       else if (panelOpen) setPanelOpen(false);
       else if (menuOpen) setMenuOpen(false);
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [modalId, panelOpen, menuOpen]);
+  }, [modalId, profileId, articleSlug, panelOpen, menuOpen]);
 
   const modalShot = modalId !== null ? SHOTS.find((s) => s.id === modalId) : null;
-  const collagePicks = [SHOTS[0], SHOTS[4], SHOTS[2], SHOTS[16], SHOTS[13]];
-  const collageCls = ["fc1", "fc2", "fc3", "fc4", "fc5"];
+  const article = articleSlug !== null ? ARTICLES.find((a) => a.slug === articleSlug) : null;
 
   const emptyMsg = sort === "following" && !follows.size
     ? "You're not following anyone yet. Follow a designer and their work shows up here."
     : "No pieces match your search. Try different keywords or clear your filters.";
+
+  function openProfile(dId) {
+    setModalId(null);
+    setProfileId(dId);
+  }
+  function openShotFromProfile(id) {
+    setProfileId(null);
+    setModalId(id);
+  }
 
   return (
     <>
@@ -320,56 +452,45 @@ export default function Home() {
       <main id="top">
         {/* ================= HERO ================= */}
         <section className="hero">
-          <div className="wrap hero-grid">
-            <div>
-              <h1 className="rise d1">Discover work from the world&apos;s <em>sharpest</em> designers</h1>
-              <p className="hero-sub rise d2">
-                Forma is where design finds its audience — share your pieces, follow the people
-                shaping the craft, and land your next project.
-              </p>
-              <form
-                className="hero-search rise d3"
-                onSubmit={(e) => { e.preventDefault(); setQuery(q, true); }}
-              >
-                <Search className="i" aria-hidden="true" />
-                <input
-                  id="hero-search-input"
-                  type="search"
-                  placeholder="Try “fintech dashboard” or “brand identity”"
-                  aria-label="Search pieces"
-                  value={q}
-                  onChange={(e) => setQuery(e.target.value, false)}
-                />
-                <button className="btn btn-primary" type="submit">Search</button>
-              </form>
-              <div className="tag-chips rise d4">
-                <span>Popular:</span>
-                {["Branding", "Mobile UI", "Illustration", "3D", "Typography", "Motion"].map((t) => (
-                  <button key={t} className="chip" onClick={() => setQuery(t.toLowerCase(), true)}>{t}</button>
-                ))}
-              </div>
-              <p className="hero-stats mono rise d5">
-                <span><b>48K</b> designers</span><span className="dot">·</span>
-                <span><b>1.2M</b> pieces</span><span className="dot">·</span>
-                <span><b>6K</b> studios hiring</span>
-              </p>
-            </div>
-            <div className="collage rise d3" aria-hidden="true">
-              {collagePicks.map((s, i) => {
-                const des = DESIGNERS[s.d];
-                return (
-                  <div className={`float-card ${collageCls[i]}`} key={s.id}>
-                    <Thumb shot={s} />
-                    <div className="fc-meta">
-                      <span className="ava" style={{ background: des.hue }}>{des.init}</span>
-                      {des.n}
-                    </div>
-                  </div>
-                );
-              })}
+          <div className="wrap hero-center">
+            <p className="eyebrow rise d1">1.2M pieces · 48K designers · 6K studios hiring</p>
+            <h1 className="rise d2">Discover the world&apos;s<br /><RotatingWord /> designers</h1>
+            <p className="hero-sub rise d3">
+              Forma is where design finds its audience — explore standout work, follow the
+              people shaping the craft, and get hired.
+            </p>
+            <form
+              className="hero-search rise d4"
+              onSubmit={(e) => { e.preventDefault(); setQuery(q, true); }}
+            >
+              <Search className="i" aria-hidden="true" />
+              <input
+                id="hero-search-input"
+                type="search"
+                placeholder="Try “fintech dashboard” or “brand identity”"
+                aria-label="Search pieces"
+                value={q}
+                onChange={(e) => setQuery(e.target.value, false)}
+              />
+              <button className="btn btn-primary" type="submit">Search</button>
+            </form>
+            <div className="tag-chips rise d5">
+              <span>Trending:</span>
+              {["Branding", "Mobile UI", "Illustration", "3D", "Typography", "Motion"].map((t) => (
+                <button key={t} className="chip" onClick={() => setQuery(t.toLowerCase(), true)}>{t}</button>
+              ))}
             </div>
           </div>
         </section>
+
+        {/* ================= STUDIO MARQUEE ================= */}
+        <div className="marquee-band" aria-hidden="true">
+          <div className="marquee">
+            {[...STUDIOS, ...STUDIOS].map((s, i) => (
+              <span key={i}><i className="m-dot" />{s}</span>
+            ))}
+          </div>
+        </div>
 
         {/* ================= FILTER BAR ================= */}
         <div className="filter-bar" id="explore">
@@ -449,16 +570,17 @@ export default function Home() {
         <section className="shots-section">
           <div className="wrap">
             {visible.length > 0 ? (
-              <div className="grid">
+              <div className="grid" key={filterKey}>
                 {visible.map((s, i) => (
                   <Card
                     key={s.id}
                     shot={s}
-                    fresh={freshFrom !== null && i >= freshFrom}
+                    delay={(freshFrom !== null && i >= freshFrom ? i - freshFrom : Math.min(i, 11)) * 45}
                     isLiked={liked.has(s.id)}
                     isSaved={saved.has(s.id)}
                     likeCount={likesOf(s)}
                     onOpen={setModalId}
+                    onOpenProfile={openProfile}
                     onLike={toggleLike}
                     onSave={toggleSave}
                   />
@@ -487,7 +609,7 @@ export default function Home() {
 
         {/* ================= HIRE ================= */}
         <section className="section hire-section" id="hire">
-          <div className="wrap">
+          <div className="wrap reveal">
             <div className="section-head">
               <div>
                 <p className="eyebrow">For teams &amp; studios</p>
@@ -537,7 +659,7 @@ export default function Home() {
                     <div className="hire-minis">
                       {minis.map((m) => <Thumb shot={m} key={m.id} />)}
                     </div>
-                    <button className="btn btn-ghost" onClick={() => toast(`Opening ${d.n}’s profile`)}>
+                    <button className="btn btn-ghost" onClick={() => setProfileId(dId)}>
                       View profile
                     </button>
                   </article>
@@ -549,7 +671,7 @@ export default function Home() {
 
         {/* ================= JOBS ================= */}
         <section className="section" id="jobs">
-          <div className="wrap">
+          <div className="wrap reveal">
             <div className="section-head">
               <div>
                 <p className="eyebrow">Design jobs</p>
@@ -579,7 +701,7 @@ export default function Home() {
 
         {/* ================= FEATURES ================= */}
         <section className="section">
-          <div className="wrap">
+          <div className="wrap reveal">
             <div className="section-head">
               <div>
                 <p className="eyebrow">Why Forma</p>
@@ -608,7 +730,7 @@ export default function Home() {
 
         {/* ================= TESTIMONIALS ================= */}
         <section className="section testi-section">
-          <div className="wrap">
+          <div className="wrap reveal">
             <div className="section-head">
               <div>
                 <p className="eyebrow">From the community</p>
@@ -652,7 +774,7 @@ export default function Home() {
 
         {/* ================= BLOG ================= */}
         <section className="section" id="blog">
-          <div className="wrap">
+          <div className="wrap reveal">
             <div className="section-head">
               <div>
                 <p className="eyebrow">The Forma Journal</p>
@@ -660,15 +782,8 @@ export default function Home() {
               </div>
             </div>
             <div className="blog-grid">
-              {[
-                { title: "The grid is a promise", grad: "linear-gradient(120deg,#3D5AFE,#141A2E)", meta: "Process · 7 min read",
-                  blurb: "Why layout systems earn trust before a single word is read — and when to break them on purpose." },
-                { title: "Pricing creative work without apologizing", grad: "linear-gradient(120deg,#FF7A59,#8A2D3B)", meta: "Business · 11 min read",
-                  blurb: "Six working designers on day rates, value pricing, and the email template that changed their income." },
-                { title: "Motion with intent", grad: "linear-gradient(120deg,#1F8A70,#12343B)", meta: "Craft · 9 min read",
-                  blurb: "Animation that explains instead of decorates: easing, choreography, and knowing when to hold still." },
-              ].map((b) => (
-                <button className="blog-card" key={b.title} onClick={() => toast(`Opening “${b.title}” — coming soon`)}>
+              {ARTICLES.map((b) => (
+                <button className="blog-card" key={b.slug} onClick={() => setArticleSlug(b.slug)}>
                   <div className="blog-cover" style={{ background: b.grad }} />
                   <div className="blog-body">
                     <h3>{b.title}</h3>
@@ -683,7 +798,7 @@ export default function Home() {
 
         {/* ================= CTA ================= */}
         <section className="cta-band">
-          <div className="wrap cta-inner">
+          <div className="wrap cta-inner reveal">
             <p className="eyebrow coral">Where design finds its audience</p>
             <h2>Ready to share what <em>you&apos;re</em> making?</h2>
             <p>Join 48,000 designers publishing their best work, finding their people, and getting hired on Forma.</p>
@@ -736,14 +851,7 @@ export default function Home() {
             <a href="#blog">Community guidelines</a>
             <a href="#top">Help center</a>
             <p className="digest-note">Get the weekly digest</p>
-            <form
-              className="newsletter"
-              onSubmit={(e) => {
-                e.preventDefault();
-                toast("You're on the list — first digest lands Friday");
-                e.target.reset();
-              }}
-            >
+            <form className="newsletter" onSubmit={subscribe}>
               <input type="email" required placeholder="you@studio.com" aria-label="Email for newsletter" />
               <button className="btn btn-primary" type="submit" aria-label="Subscribe">
                 <Send className="i" aria-hidden="true" />
@@ -757,7 +865,7 @@ export default function Home() {
         </div>
       </footer>
 
-      {/* ================= MODAL ================= */}
+      {/* ================= OVERLAYS ================= */}
       {modalShot && (
         <Modal
           key={modalShot.id}
@@ -772,8 +880,24 @@ export default function Home() {
           onClose={() => setModalId(null)}
           onTagSearch={(t) => { setModalId(null); setQuery(t, true); }}
           onOpenShot={setModalId}
+          onOpenProfile={openProfile}
           toast={toast}
         />
+      )}
+      {profileId && (
+        <ProfileModal
+          key={profileId}
+          dId={profileId}
+          follows={follows}
+          likesOf={likesOf}
+          onFollow={toggleFollow}
+          onClose={() => setProfileId(null)}
+          onOpenShot={openShotFromProfile}
+          toast={toast}
+        />
+      )}
+      {article && (
+        <ArticleModal article={article} onClose={() => setArticleSlug(null)} />
       )}
 
       {/* ================= TOASTS ================= */}

@@ -7,16 +7,25 @@ import {
 import Thumb from "./Thumb";
 import { DESIGNERS, SHOTS, COMMENTS, fmt } from "../lib/data";
 
+/* Fallback if the comments API is unreachable (mirrors the server seed). */
+function seedComments(shot) {
+  return COMMENTS.slice(0, 3 + (shot.id % 2)).map((c, i) => {
+    const w = DESIGNERS[c.w];
+    return { id: `seed-${shot.id}-${i}`, author: w.n, init: w.init, hue: w.hue, when: `${c.t} ago`, text: c.m };
+  });
+}
+
 export default function Modal({
   shot, liked, saved, follows, likesOf,
-  onLike, onSave, onFollow, onClose, onTagSearch, onOpenShot, toast,
+  onLike, onSave, onFollow, onClose, onTagSearch, onOpenShot, onOpenProfile, toast,
 }) {
   const des = DESIGNERS[shot.d];
   const closeRef = useRef(null);
   const boxRef = useRef(null);
   const more = SHOTS.filter((x) => x.d === shot.d && x.id !== shot.id).slice(0, 3);
-  const [comments, setComments] = useState(() => COMMENTS.slice(0, 3 + (shot.id % 2)));
+  const [comments, setComments] = useState(null);
   const [draft, setDraft] = useState("");
+  const [posting, setPosting] = useState(false);
   const isLiked = liked.has(shot.id);
   const isSaved = saved.has(shot.id);
   const isFollowing = follows.has(shot.d);
@@ -24,6 +33,16 @@ export default function Modal({
   useEffect(() => {
     closeRef.current?.focus();
   }, []);
+
+  /* Load comments from the API; fall back to the local seed. */
+  useEffect(() => {
+    let alive = true;
+    fetch(`/api/shots/${shot.id}/comments`)
+      .then((r) => (r.ok ? r.json() : Promise.reject()))
+      .then((d) => { if (alive) setComments(d.comments); })
+      .catch(() => { if (alive) setComments(seedComments(shot)); });
+    return () => { alive = false; };
+  }, [shot]);
 
   function trapTab(e) {
     if (e.key !== "Tab") return;
@@ -48,12 +67,25 @@ export default function Modal({
     }
   }
 
-  function postComment(e) {
+  async function postComment(e) {
     e.preventDefault();
-    const txt = draft.trim();
-    if (!txt) return;
-    setComments((c) => [...c, { w: "you", t: "now", m: txt }]);
+    const text = draft.trim();
+    if (!text || posting) return;
+    setPosting(true);
+    try {
+      const r = await fetch(`/api/shots/${shot.id}/comments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (!r.ok) throw new Error();
+      const { comment } = await r.json();
+      setComments((c) => [...(c || []), comment]);
+    } catch {
+      setComments((c) => [...(c || []), { id: `local-${Date.now()}`, author: "You", init: "YOU", hue: "#3D5AFE", when: "now", text }]);
+    }
     setDraft("");
+    setPosting(false);
     toast("Comment posted");
   }
 
@@ -69,11 +101,17 @@ export default function Modal({
         </button>
 
         <div className="modal-head">
-          <span className="ava" style={{ background: des.hue }} aria-hidden="true">{des.init}</span>
+          <button
+            className="meta-link"
+            onClick={() => onOpenProfile(shot.d)}
+            aria-label={`Open ${des.n}'s profile`}
+          >
+            <span className="ava" style={{ background: des.hue }} aria-hidden="true">{des.init}</span>
+          </button>
           <div className="modal-title">
             <h2>{shot.t}</h2>
             <p className="by">
-              {des.n}{" "}
+              <button className="meta-link name-link" onClick={() => onOpenProfile(shot.d)}>{des.n}</button>
               {des.badge && <span className={`badge badge-${des.badge.toLowerCase()}`}>{des.badge}</span>}
               {" · "}{des.spec}
               {des.avail && <> <span className="avail-dot" aria-hidden="true" /> <span>Available</span></>}
@@ -94,7 +132,7 @@ export default function Modal({
           </div>
         </div>
 
-        <div className="modal-preview"><Thumb shot={shot} className="th-wide" /></div>
+        <div className="modal-preview"><Thumb shot={shot} /></div>
 
         <div className="modal-actions">
           <button
@@ -132,33 +170,34 @@ export default function Modal({
               ))}
             </div>
 
-            <p className="modal-section-label">Comments ({comments.length})</p>
+            <p className="modal-section-label">
+              Comments{comments ? ` (${comments.length})` : ""}
+            </p>
             <div className="comments">
-              {comments.map((c, i) => {
-                const w = c.w === "you"
-                  ? { n: "You", init: "YOU", hue: "var(--accent)" }
-                  : DESIGNERS[c.w];
-                return (
-                  <div className="comment" key={i}>
-                    <span className="ava" style={{ background: w.hue }} aria-hidden="true">{w.init}</span>
-                    <div className="c-body">
-                      <b>{w.n}</b><time>{c.t}{c.t === "now" ? "" : " ago"}</time>
-                      <p>{c.m}</p>
-                    </div>
+              {comments === null && <p className="comments-loading">Loading comments…</p>}
+              {(comments || []).map((c) => (
+                <div className="comment" key={c.id}>
+                  <span className="ava" style={{ background: c.hue }} aria-hidden="true">{c.init}</span>
+                  <div className="c-body">
+                    <b>{c.author}</b><time>{c.when}</time>
+                    <p>{c.text}</p>
                   </div>
-                );
-              })}
+                </div>
+              ))}
             </div>
             <form className="comment-form" onSubmit={postComment}>
               <input
                 type="text"
                 required
+                maxLength={500}
                 placeholder="Add a comment…"
                 aria-label="Add a comment"
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
               />
-              <button className="btn btn-primary" type="submit">Post</button>
+              <button className="btn btn-primary" type="submit" disabled={posting}>
+                {posting ? "Posting…" : "Post"}
+              </button>
             </form>
           </div>
 
